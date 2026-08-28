@@ -147,13 +147,6 @@ app.get("/logout",(req,res)=>{
 });
 
 
-// async function getAllUsers() {
-//     const users = await userModel.find();
-//     console.log(users);
-    
-//   }
-//   getAllUsers();
-
 
 //edit profile
 app.get("/doctorProfile/:id/edit",async (req,res)=>{
