@@ -37,6 +37,9 @@ if (!fs.existsSync(uploadDir)) {
 
 const upload = multer({ dest: uploadDir });
 
+// In-memory OTP storage for password resets (email -> { otp, expiresAt })
+const otpStore = new Map();
+
 // View engine & static setup
 app.set("views", path.join(__dirname, "views"));
 app.set("view engine", "ejs");
@@ -94,7 +97,7 @@ app.post("/signup", async (req, res) => {
     }
 
     // Check if user already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
       return res.status(400).send("Email already registered");
     }
@@ -105,13 +108,13 @@ app.post("/signup", async (req, res) => {
     // Save new user
     const newUser = await User.create({
       username,
-      email,
+      email: email.toLowerCase(),
       password: hash
     });
     console.log("New user saved:", newUser.email);
 
     // Generate token
-    const token = jwt.sign({ email }, JWT_SECRET);
+    const token = jwt.sign({ email: newUser.email }, JWT_SECRET);
     res.cookie("token", token);
 
     // Redirect to profile
@@ -128,7 +131,7 @@ app.get("/login", (req, res) => {
 
 app.post("/login", async function(req, res) {
   try {
-    const user = await User.findOne({ email: req.body.email });
+    const user = await User.findOne({ email: req.body.email ? req.body.email.toLowerCase() : "" });
     if (!user) return res.send("Invalid email or password");
 
     bcrypt.compare(req.body.password, user.password, function(err, result) {
@@ -151,6 +154,96 @@ app.get("/logout", (req, res) => {
   res.redirect("/");
 });
 
+// Forgot Password & OTP Flow
+app.get("/forgot-password", (req, res) => {
+  res.render("forgot.ejs");
+});
+
+app.post("/send-otp", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
+    if (!user) {
+      return res.status(404).json({ success: false, message: "No registered account found with this email" });
+    }
+
+    // Generate a 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+    otpStore.set(normalizedEmail, { otp, expiresAt });
+    console.log(`[AUTH] Password reset OTP for ${normalizedEmail}: ${otp}`);
+
+    res.json({ success: true, message: "OTP sent successfully" });
+  } catch (err) {
+    console.error("Send OTP error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.post("/verify-otp", (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, message: "Email and OTP are required" });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const record = otpStore.get(normalizedEmail);
+    if (!record) {
+      return res.status(400).json({ success: false, message: "No OTP requested or session expired" });
+    }
+
+    if (Date.now() > record.expiresAt) {
+      otpStore.delete(normalizedEmail);
+      return res.status(400).json({ success: false, message: "OTP has expired" });
+    }
+
+    if (record.otp !== otp.trim()) {
+      return res.status(400).json({ success: false, message: "Incorrect OTP code" });
+    }
+
+    res.json({ success: true, message: "OTP verified successfully" });
+  } catch (err) {
+    console.error("Verify OTP error:", err);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.post("/reset-password", async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({ success: false, message: "All fields are required" });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ success: false, message: "Password must be at least 6 characters" });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const record = otpStore.get(normalizedEmail);
+    if (!record || record.otp !== otp.trim() || Date.now() > record.expiresAt) {
+      return res.status(400).json({ success: false, message: "Invalid or expired OTP session" });
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await User.findOneAndUpdate({ email: normalizedEmail }, { password: hashedPassword });
+    otpStore.delete(normalizedEmail);
+
+    console.log(`[AUTH] Password successfully reset for ${normalizedEmail}`);
+    res.json({ success: true, message: "Password reset successfully" });
+  } catch (err) {
+    console.error("Reset password error:", err);
+    res.status(500).json({ success: false, message: "Failed to reset password" });
+  }
+});
+
 // Edit profile
 app.get("/doctorProfile/:id/edit", async (req, res) => {
   try {
@@ -169,7 +262,7 @@ app.put("/doctorProfile/:id", async (req, res) => {
     const { email: newemail } = req.body;
     const updatedUser = await User.findByIdAndUpdate(
       id,
-      { email: newemail },
+      { email: newemail.toLowerCase() },
       { runValidators: true, returnDocument: "after" }
     );
 
@@ -311,7 +404,7 @@ app.post("/predict", upload.single("file"), async (req, res) => {
     const filePath = req.file.path;
     console.log("Uploaded File for Prediction:", filePath);
 
-    // 1. If remote AI API URL is configured (e.g., when hosted on Vercel with backend model on Render / HF)
+    // 1. If remote AI API URL is configured (e.g. Render / Hugging Face Spaces microservice)
     if (process.env.AI_API_URL) {
       try {
         const fileBuffer = fs.readFileSync(filePath);
@@ -334,16 +427,15 @@ app.post("/predict", upload.single("file"), async (req, res) => {
       }
     }
 
-    // 2. Vercel Serverless Fallback (if Python environment is not bundled in serverless)
+    // 2. Vercel Serverless check: if in serverless and no AI_API_URL configured
     if (process.env.VERCEL && !process.env.PYTHON_PATH) {
-      return res.json({
-        status: "Disease Analysis Completed",
-        predictions: ["Infiltration → 42.15%", "Effusion → 28.30%"],
-        note: "Serverless Mode: configure AI_API_URL for custom remote ML worker"
+      return res.status(503).json({
+        status: "AI Service Not Configured",
+        message: "Actual AI inference requires connecting a dedicated model microservice. Please configure AI_API_URL in your Vercel Environment Variables pointing to your hosted AI service (e.g. Render/HuggingFace)."
       });
     }
 
-    // 3. Local Python Execution
+    // 3. Local Python Execution (TensorFlow)
     const pythonFile = path.join(__dirname, "../AI/model/predict.py");
 
     let pythonBin = process.env.PYTHON_PATH;
