@@ -101,7 +101,7 @@ document.querySelector('#contactForm').addEventListener('submit', (e) => {
   const email = document.querySelector('#email').value;
   const message = document.querySelector('#message').value;
 
-  fetch('http://localhost:3000/contact', {
+  fetch('/contact', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, email, message })
