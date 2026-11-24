@@ -31,3 +31,5 @@ backend/public/uploads/*
 # OS Files
 .DS_Store
 Thumbs.db
+
+.vercel
