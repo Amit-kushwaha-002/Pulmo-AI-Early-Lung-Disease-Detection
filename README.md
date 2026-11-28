@@ -78,3 +78,5 @@ This repository is pre-configured for one-click deployment on [Vercel](https://v
 - **`vercel.json`**: Configures URL routing and includes view templates in serverless builds.
 - **`backend/`**: Express application containing routes, models, views (EJS), and public assets.
 - **`AI/model/`**: Trained deep learning model (`lung_model.h5`) and Python inference script (`predict.py`).
+
+URL ;-   https://pulmo-ai-early-lung-disease-detection.vercel.app/
